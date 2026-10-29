@@ -267,15 +267,76 @@ DEFINE_BPF_PROG_KVER(schedcls, tether_upstream6_ether, AID_NETWORK_STACK, 5_4)
     return do_forward6(skb, ETHER, UPSTREAM, KVER_5_4);
 }
 
-// implementation for 4.9/4.14/4.19
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_downstream6_ether, AID_NETWORK_STACK, 4_9, 5_4)
+// Preserve legacy behavior outside the downstream Android 17.0 contract.
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_9, 5_4, MINAPI, 26Q2, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
     return do_forward6(skb, ETHER, DOWNSTREAM, KVER_4_9);
 }
 
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_upstream6_ether, AID_NETWORK_STACK, 4_9, 5_4)
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_9, 5_4, MINAPI, 26Q2, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
     return do_forward6(skb, ETHER, UPSTREAM, KVER_4_9);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_9, 4_14, 26Q2, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, DOWNSTREAM, KVER_4_9);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_9, 4_14, 26Q2, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, UPSTREAM, KVER_4_9);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_19, 5_4, 26Q2, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, DOWNSTREAM, KVER_4_9);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_19, 5_4, 26Q2, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, UPSTREAM, KVER_4_9);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q3, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, DOWNSTREAM, KVER_4_9);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q3, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, UPSTREAM, KVER_4_9);
+}
+
+// Require the existing full GSO accounting implementation on the backported kernel.
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, DOWNSTREAM, KVER_5_4);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, ETHER, UPSTREAM, KVER_5_4);
 }
 
 // Note: section names must be unique to prevent programs from appending to each other,
@@ -302,15 +363,62 @@ DEFINE_BPF_PROG_KVER(schedcls, tether_upstream6_rawip, AID_NETWORK_STACK, 5_4)
     return do_forward6(skb, RAWIP, UPSTREAM, KVER_5_4);
 }
 
-// and for 4.14/4.19 kernels
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_downstream6_rawip, AID_NETWORK_STACK, 4_14, 5_4)
+// Preserve legacy raw-IP behavior outside the downstream Android 17.0 contract.
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 5_4, MINAPI, 26Q2, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
     return do_forward6(skb, RAWIP, DOWNSTREAM, KVER_4_14);
 }
 
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_upstream6_rawip, AID_NETWORK_STACK, 4_14, 5_4)
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 5_4, MINAPI, 26Q2, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
     return do_forward6(skb, RAWIP, UPSTREAM, KVER_4_14);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_19, 5_4, 26Q2, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, RAWIP, DOWNSTREAM, KVER_4_14);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_19, 5_4, 26Q2, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, RAWIP, UPSTREAM, KVER_4_14);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q3, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, RAWIP, DOWNSTREAM, KVER_4_14);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q3, MAXAPI, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, RAWIP, UPSTREAM, KVER_4_14);
+}
+
+// These mandatory variants require the backported GSO and head-adjustment support.
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, RAWIP, DOWNSTREAM, KVER_5_4);
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream6_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    return do_forward6(skb, RAWIP, UPSTREAM, KVER_5_4);
 }
 
 // and define no-op stubs for pre-4.14 kernels.
@@ -690,28 +798,61 @@ DEFINE_OPTIONAL_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_ether,
 // Full featured (optional) implementations for 4.14-S & 4.19-S kernels
 // (optional, because we need to be able to fallback for 4.14/4.19 pre-S kernels)
 
-DEFINE_OPTIONAL_BPF_PROG_KVER_RANGE(schedcls, tether_downstream4_rawip,
-                                    AID_NETWORK_STACK, 4_14, 5_4)
+// Partition both legacy optional programs and their partial fallbacks around
+// the mandatory downstream contract. Preserve their bodies and priority elsewhere.
+#define DEFINE_LEGACY_TETHER4_PROG(NAME, l2, direction, timestamp, opt) \
+    DEFINE_BPF_PROG_EXT(schedcls, NAME, AID_ROOT, AID_NETWORK_STACK, \
+                        4_14, 5_4, MINAPI, 26Q2, opt, \
+                        DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR) \
+    (struct __sk_buff* skb) { \
+        return do_forward4(skb, l2, direction, timestamp, KVER_4_14); \
+    } \
+    DEFINE_BPF_PROG_EXT(schedcls, NAME, AID_ROOT, AID_NETWORK_STACK, \
+                        4_19, 5_4, 26Q2, MAXAPI, opt, \
+                        DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR) \
+    (struct __sk_buff* skb) { \
+        return do_forward4(skb, l2, direction, timestamp, KVER_4_14); \
+    } \
+    DEFINE_BPF_PROG_EXT(schedcls, NAME, AID_ROOT, AID_NETWORK_STACK, \
+                        4_14, 4_19, 26Q3, MAXAPI, opt, \
+                        DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR) \
+    (struct __sk_buff* skb) { \
+        return do_forward4(skb, l2, direction, timestamp, KVER_4_14); \
+    }
+
+DEFINE_LEGACY_TETHER4_PROG(tether_downstream4_rawip, RAWIP, DOWNSTREAM, UPDATETIME, OPTIONAL)
+DEFINE_LEGACY_TETHER4_PROG(tether_upstream4_rawip, RAWIP, UPSTREAM, UPDATETIME, OPTIONAL)
+DEFINE_LEGACY_TETHER4_PROG(tether_downstream4_ether, ETHER, DOWNSTREAM, UPDATETIME, OPTIONAL)
+DEFINE_LEGACY_TETHER4_PROG(tether_upstream4_ether, ETHER, UPSTREAM, UPDATETIME, OPTIONAL)
+
+// Require full timestamp and GSO behavior; no optional or partial fallback is
+// eligible in this kernel/API range. Actual loading must establish support.
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream4_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
-    return do_forward4(skb, RAWIP, DOWNSTREAM, UPDATETIME, KVER_4_14);
+    return do_forward4(skb, RAWIP, DOWNSTREAM, UPDATETIME, KVER_5_10);
 }
 
-DEFINE_OPTIONAL_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_rawip,
-                                    AID_NETWORK_STACK, 4_14, 5_4)
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream4_rawip, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
-    return do_forward4(skb, RAWIP, UPSTREAM, UPDATETIME, KVER_4_14);
+    return do_forward4(skb, RAWIP, UPSTREAM, UPDATETIME, KVER_5_10);
 }
 
-DEFINE_OPTIONAL_BPF_PROG_KVER_RANGE(schedcls, tether_downstream4_ether,
-                                    AID_NETWORK_STACK, 4_14, 5_4)
+DEFINE_BPF_PROG_EXT(schedcls, tether_downstream4_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
-    return do_forward4(skb, ETHER, DOWNSTREAM, UPDATETIME, KVER_4_14);
+    return do_forward4(skb, ETHER, DOWNSTREAM, UPDATETIME, KVER_5_10);
 }
 
-DEFINE_OPTIONAL_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_ether,
-                                    AID_NETWORK_STACK, 4_14, 5_4)
+DEFINE_BPF_PROG_EXT(schedcls, tether_upstream4_ether, AID_ROOT, AID_NETWORK_STACK,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
-    return do_forward4(skb, ETHER, UPSTREAM, UPDATETIME, KVER_4_14);
+    return do_forward4(skb, ETHER, UPSTREAM, UPDATETIME, KVER_5_10);
 }
 
 // Partial (TCP-only: will not update 'last_used' field) implementations for 4.14+ kernels.
@@ -740,15 +881,8 @@ DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_rawip, AID_NETWORK_STACK, 
 
 // RAWIP: Required for 4.14/4.19 pre-S kernels
 
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_downstream4_rawip, AID_NETWORK_STACK, 4_14, 5_4)
-(struct __sk_buff* skb) {
-    return do_forward4(skb, RAWIP, DOWNSTREAM, NO_UPDATETIME, KVER_4_14);
-}
-
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_rawip, AID_NETWORK_STACK, 4_14, 5_4)
-(struct __sk_buff* skb) {
-    return do_forward4(skb, RAWIP, UPSTREAM, NO_UPDATETIME, KVER_4_14);
-}
+DEFINE_LEGACY_TETHER4_PROG(tether_downstream4_rawip, RAWIP, DOWNSTREAM, NO_UPDATETIME, MANDATORY)
+DEFINE_LEGACY_TETHER4_PROG(tether_upstream4_rawip, RAWIP, UPSTREAM, NO_UPDATETIME, MANDATORY)
 
 // ETHER: Required for 5.4-R kernels.
 
@@ -764,15 +898,10 @@ DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_ether, AID_NETWORK_STACK, 
 
 // ETHER: Required for 4.14-Q/R, 4.19-Q/R kernels.
 
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_downstream4_ether, AID_NETWORK_STACK, 4_14, 5_4)
-(struct __sk_buff* skb) {
-    return do_forward4(skb, ETHER, DOWNSTREAM, NO_UPDATETIME, KVER_4_14);
-}
+DEFINE_LEGACY_TETHER4_PROG(tether_downstream4_ether, ETHER, DOWNSTREAM, NO_UPDATETIME, MANDATORY)
+DEFINE_LEGACY_TETHER4_PROG(tether_upstream4_ether, ETHER, UPSTREAM, NO_UPDATETIME, MANDATORY)
 
-DEFINE_BPF_PROG_KVER_RANGE(schedcls, tether_upstream4_ether, AID_NETWORK_STACK, 4_14, 5_4)
-(struct __sk_buff* skb) {
-    return do_forward4(skb, ETHER, UPSTREAM, NO_UPDATETIME, KVER_4_14);
-}
+#undef DEFINE_LEGACY_TETHER4_PROG
 
 // Placeholder (no-op) implementations for 4.9 kernels
 

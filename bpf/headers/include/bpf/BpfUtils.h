@@ -155,6 +155,17 @@ const bool isAtLeastV    = (api_level_full >= 3500);  // 35
 const bool isAtLeast25Q2 = (api_level_full >= 3600);  // 36.0
 const bool isAtLeast25Q4 = (api_level_full >= 3610);  // 36.1
 const bool isAtLeast26Q2 = (api_level_full >= 3700);  // 37.0
+
+// Downstream Android 17.0 requirements for the backported 64-bit 4.14 kernel.
+// This is not a capability probe or an upstream compatibility claim. All maps,
+// programs, attachments and functional checks remain mandatory. Callers must
+// handle minimum-version policy exceptions explicitly; version queries remain
+// truthful and unchanged.
+static inline bool requiresAndroid17BackportContract() {
+    return isKernel64Bit() && isUserspace64bit() &&
+           api_level_full >= 3700 && api_level_full < 3702 &&
+           isAtLeastKernelVersion(4, 14) && !isAtLeastKernelVersion(4, 19);
+}
 const bool isAtLeast26Q3 = (api_level_full >= 3702);  // 37.0+
 const bool isAtLeast26Q4 = (api_level_full >= 3710);  // 37.1
 const bool isAtLeast27Q1 = (api_level_full >= 3712);  // 37.1+

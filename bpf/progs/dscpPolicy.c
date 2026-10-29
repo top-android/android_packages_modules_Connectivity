@@ -308,4 +308,18 @@ DEFINE_BPF_PROG_KVER(schedcls, set_dscp_ether, AID_SYSTEM, 5_15)
     return TC_ACT_PIPE;
 }
 
+// Require the complete existing policy matcher on the downstream backport contract.
+DEFINE_BPF_PROG_EXT(schedcls, set_dscp_ether, AID_ROOT, AID_SYSTEM,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    if (skb->protocol == htons(ETH_P_IP)) {
+        match_policy(skb, true);
+    } else if (skb->protocol == htons(ETH_P_IPV6)) {
+        match_policy(skb, false);
+    }
+
+    return TC_ACT_PIPE;
+}
+
 LICENSE("Apache 2.0");

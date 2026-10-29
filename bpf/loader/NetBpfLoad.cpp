@@ -572,15 +572,17 @@ static int loadBtf(const ElfObject &elfObj, struct btf *btf) {
         if (ret) return ret;
     }
 
-    if (!isAtLeastKernelVersion(5, 10)) {
-        // Likely unnecessary on kernel 5.4 but untested.
-        sanitizeBtf(btf);
-    }
-
+    // Backported BTF support is independent of the kernel release. Try the
+    // production type graph first; preserve the existing legacy fallback only
+    // for EINVAL, never for permission or resource failures.
     ret = btf__load_into_kernel(btf);
+    if (ret == -EINVAL && !isAtLeastKernelVersion(5, 10)) {
+        sanitizeBtf(btf);
+        ret = btf__load_into_kernel(btf);
+    }
     if (ret) {
-        if (errno != EINVAL) {
-            ALOGE("btf__load_into_kernel failed, errno: %d", errno);
+        if (ret != -EINVAL) {
+            ALOGE("btf__load_into_kernel failed: %d", ret);
             return ret;
         };
         // For BTF_KIND_FUNC, newer kernels can read the BTF_INFO_VLEN bits of
@@ -734,6 +736,19 @@ static int pinMap(const borrowed_fd& fd, const struct bpf_map_def& mapDef) {
         return 0;
 }
 
+static bool mustAttemptMapCreationBelowMinKver(const struct bpf_map_def& mapDef) {
+    // Android 17 requires these maps even on kernels carrying backports.
+    // Their existing 5.10 metadata describes upstream availability. Attempt
+    // the declared type and let map creation fail on every unsupported,
+    // permission or resource error; this is not a positive capability probe.
+    // API ranges and upper kernel bounds remain checked by both callers.
+    // Explicit minimum-kernel policy is enforced separately.
+    constexpr unsigned int minKver510 = KVER(5, 10, 0);
+    return isAtLeast26Q2 && isAtLeastKernelVersion(4, 14) &&
+           mapDef.min_kver == minKver510 && mapDef.min_kver < mapDef.max_kver &&
+           (mapDef.type == BPF_MAP_TYPE_RINGBUF || mapDef.type == BPF_MAP_TYPE_SK_STORAGE);
+}
+
 static bool isMapTypeSupported(enum bpf_map_type type) {
     if (type == BPF_MAP_TYPE_LPM_TRIE && !isAtLeastKernelVersion(4, 14)) {
         // On Linux Kernels older than 4.14 this map type doesn't exist - autoskip.
@@ -754,17 +769,40 @@ static enum bpf_map_type sanitizeMapType(enum bpf_map_type type) {
         return BPF_MAP_TYPE_ARRAY;
     }
     if (type == BPF_MAP_TYPE_DEVMAP_HASH && !isAtLeastKernelVersion(5, 4)) {
-        // On Linux Kernels older than 5.4 this map type doesn't exist, but it can kind
-        // of be approximated: HASH has the same userspace visible api.
-        // However it cannot be used by ebpf programs in the same way.
-        // Since bpf_redirect_map() only requires 4.14, a program using a DEVMAP_HASH map
-        // would fail to load (due to trying to redirect to a HASH instead of DEVMAP_HASH).
-        // One must thus tag any BPF_MAP_TYPE_DEVMAP_HASH + bpf_redirect_map() using
-        // programs as being 5.4+...
-        return  BPF_MAP_TYPE_HASH;
+        // Android 17 requires the declared redirect-map semantics, including
+        // on kernels with backports. Let actual map creation determine support
+        // and fail on every error; EINVAL can also indicate a memlock failure.
+        // Minimum-kernel policy and program selection are checked separately.
+        if (isAtLeast26Q2) return type;
+
+        // Retain the legacy placeholder for older platform releases. Their
+        // DEVMAP_HASH redirect programs are gated on kernel 5.4 or newer.
+        return BPF_MAP_TYPE_HASH;
     }
     // No sanitization is required.
     return type;
+}
+
+// Probe the BTF_LOAD command with one valid integer type, following libbpf's
+// minimal raw-BTF probing approach. This establishes command support only;
+// loadBtf() must still validate every production type graph. No pin or attach.
+// Return 1 for support, 0 for absence, or a negative error that must propagate.
+static int probeBtfSupport() {
+    static const int result = []() -> int {
+        struct btf* probe = btf__new_empty();
+        if (!probe) return -(errno ? errno : ENOMEM);
+        const int err = static_cast<int>(libbpf_get_error(probe));
+        if (err) return err;
+        auto guard = base::make_scope_guard([probe] { btf__free(probe); });
+
+        int ret = btf__add_int(probe, "int", 4, BTF_INT_SIGNED);
+        if (ret < 0) return ret;
+        ret = btf__load_into_kernel(probe);
+        if (!ret) return 1;
+        if (ret == -EINVAL || ret == -ENOSYS) return 0;
+        return ret;
+    }();
+    return result;
 }
 
 static int createMaps(const ElfObject& elfObj, const span<const struct bpf_map_def> md,
@@ -773,8 +811,14 @@ static int createMaps(const ElfObject& elfObj, const span<const struct bpf_map_d
     span<const char> btfData;
     struct btf *btf = NULL;
     auto btfGuard = base::make_scope_guard([&btf] { if (btf) btf__free(btf); });
-    if (isAtLeastKernelVersion(4, 19)) {
-        // On Linux Kernels older than 4.18 BPF_BTF_LOAD command doesn't exist.
+    // Retain the existing native-kernel path, but detect real backports on
+    // older releases. Permission/resource failures must not disable BTF.
+    const int btfSupport = isAtLeastKernelVersion(4, 19) ? 1 : probeBtfSupport();
+    if (btfSupport < 0) {
+        ALOGE("BTF capability probe failed: %d", btfSupport);
+        return btfSupport;
+    }
+    if (btfSupport) {
         ret = elfObj.readSectionByName(".BTF", btfData);
         if (ret) {
             ALOGE("Failed to read .BTF section, ret:%d", ret);
@@ -805,7 +849,8 @@ static int createMaps(const ElfObject& elfObj, const span<const struct bpf_map_d
             continue;
         }
 
-        if (kernelVer < md[i].min_kver) {
+        if (kernelVer < md[i].min_kver &&
+            !mustAttemptMapCreationBelowMinKver(md[i])) {
             ALOGD("skipping map %s which requires kernel version 0x%x >= 0x%x",
                   md[i].name(), kernelVer, md[i].min_kver);
             mapFds.push_back(unique_fd());
@@ -1010,6 +1055,12 @@ static int validateProg(const borrowed_fd& fd, const char* const progPinLoc) {
 }
 
 static enum bpf_attach_type fixup_attach(enum bpf_prog_type prog_type, enum bpf_attach_type expected_attach_type) {
+    // Android 17 requires the declared attachment contract, including on
+    // kernels carrying backports. Let BPF_PROG_LOAD validate that contract;
+    // do not substitute another attachment type based on the release number.
+    // Minimum-kernel policy and program selection are enforced separately.
+    if (isAtLeast26Q2) return expected_attach_type;
+
     if (!isAtLeastKernelVersion(4, 19))
         if (prog_type == BPF_PROG_TYPE_CGROUP_SKB)
             if (expected_attach_type == BPF_CGROUP_INET_EGRESS)
@@ -1038,9 +1089,12 @@ static int loadCodeSections(const ElfObject& elfObj, vector<codeSection>& cs,
         if (api_level_full < cs[i].prog_def->min_api_level_full) continue;
         if (api_level_full >= cs[i].prog_def->max_api_level_full) continue;
 
+        int loadErrno = 0;
         bool reuse = false;
         if (access(cs[i].prog_def->pin_location, F_OK) == 0) {
-            fd.reset(retrieveProgram(cs[i].prog_def->pin_location));
+            const int progFd = retrieveProgram(cs[i].prog_def->pin_location);
+            loadErrno = errno;
+            fd.reset(progFd);
             ALOGD("New bpf prog load reusing prog %s, ret: %d (%s)", cs[i].prog_def->pin_location, fd.get(),
                   !fd.ok() ? std::strerror(errno) : "ok");
             reuse = true;
@@ -1061,7 +1115,10 @@ static int loadCodeSections(const ElfObject& elfObj, vector<codeSection>& cs,
             // use a copy, so that bpf() system call cannot scribble over our req,
             // which we want to mutate (to enable logging) and reuse on failure
             const union bpf_attr req_copy = req;
-            fd.reset(bpf(BPF_PROG_LOAD, req_copy));
+            const int progFd = bpf(BPF_PROG_LOAD, req_copy);
+            // Preserve the original failure if the diagnostic retry also fails.
+            loadErrno = errno;
+            fd.reset(progFd);
 
             if (fd.ok()) {
                 // on success, trivial logging
@@ -1103,11 +1160,12 @@ static int loadCodeSections(const ElfObject& elfObj, vector<codeSection>& cs,
                           cs[i].prog_def->name());
                     continue;
                 }
-                ALOGE("non-optional program %s failed to load.", cs[i].prog_def->name());
+                ALOGE("non-optional program %s failed to load: initial errno %d (%s).",
+                      cs[i].prog_def->name(), loadErrno, std::strerror(loadErrno));
             }
         }
 
-        if (!fd.ok()) return fd.get();
+        if (!fd.ok()) return -loadErrno;
 
         if (!reuse) {
             ret = pinProg(fd, cs[i].prog_def.value());
@@ -1137,7 +1195,8 @@ static int prepareLoadMaps(const struct bpf_object* obj, const span<const struct
             continue;
         }
 
-        if (kernelVer < md[i].min_kver || kernelVer >= md[i].max_kver) {
+        if ((kernelVer < md[i].min_kver &&
+             !mustAttemptMapCreationBelowMinKver(md[i])) || kernelVer >= md[i].max_kver) {
             ALOGD("skipping map %s: kernel version 0x%x is outside required range [0x%x, 0x%x)",
                   md[i].name(), kernelVer, md[i].min_kver, md[i].max_kver);
             bpf_map__set_autocreate(m, false);
@@ -1274,8 +1333,17 @@ static int loadProgByLibbpf(const char* const elfPath) {
 
     ret = bpf_object__load(obj);
     if (ret) return ret;
-    // On Linux Kernels older than 4.18 BPF_BTF_LOAD command doesn't exist.
-    if (isAtLeastKernelVersion(4, 19) && bpf_object__btf_fd(obj) < 0) return -1;
+    // Require object BTF whenever the kernel actually supports it, including
+    // backports. Do not let a failed capability probe silently disable BTF.
+    const int btfSupport = isAtLeastKernelVersion(4, 19) ? 1 : probeBtfSupport();
+    if (btfSupport < 0) {
+        ALOGE("BTF capability probe failed: %d", btfSupport);
+        return btfSupport;
+    }
+    if (btfSupport && bpf_object__btf_fd(obj) < 0) {
+        ALOGE("Object BTF was not loaded: %s", elfPath);
+        return -EINVAL;
+    }
 
     ret = pinMaps(obj, md);
     if (ret) return ret;
@@ -1348,7 +1416,138 @@ static bool loadObject(const char* const progPath, const bool useLibbpf = true) 
 #define APEXROOT "/apex/com.android.tethering"
 #define BPFROOT APEXROOT "/etc/bpf/mainline/"
 
+// The downstream policy exception requires a complete declared program set.
+// Reuse the production ELF parser and the same truthful metadata selection as
+// both loaders. A maps-only object must not stand in for a required program,
+// and legacy fallbacks must not replace the explicitly selected modern bodies.
+struct RequiredBackportProgram {
+    const char* name;
+    enum bpf_prog_type type;
+    enum bpf_attach_type attach_type;
+    bool backport_variant;
+};
+
+static bool loadBackportObject(const char* const path, const bool useLibbpf,
+                              span<const RequiredBackportProgram> required) {
+    ElfObject elfObj(path);
+    vector<codeSection> cs;
+    const int ret = readCodeSections(elfObj, cs);
+    if (ret && ret != -ENOENT) {
+        ALOGE("Cannot read required program metadata from %s: %d", path, ret);
+        return false;
+    }
+
+    vector<const struct bpf_prog_def*> selected;
+    for (const auto& section : cs) {
+        if (!section.prog_def.has_value()) {
+            ALOGE("Missing program definition in required object %s", path);
+            return false;
+        }
+        const auto& def = section.prog_def.value();
+        if (kernelVer < def.min_kver || kernelVer >= def.max_kver ||
+            api_level_full < def.min_api_level_full ||
+            api_level_full >= def.max_api_level_full) continue;
+        if (def.optional || section.data.empty()) {
+            ALOGE("Optional or empty program in downstream contract: %s", def.name());
+            return false;
+        }
+        for (const auto* previous : selected) {
+            if (!strcmp(previous->name(), def.name()) ||
+                !strcmp(previous->pin_location, def.pin_location)) {
+                ALOGE("Ambiguous downstream program selection: %s", def.name());
+                return false;
+            }
+        }
+        selected.push_back(&def);
+    }
+
+    if (selected.size() != required.size()) {
+        ALOGE("Incomplete downstream object %s: selected %zu programs, require %zu",
+              path, selected.size(), required.size());
+        return false;
+    }
+    for (const auto& requirement : required) {
+        const auto found = std::find_if(selected.begin(), selected.end(),
+                [&requirement](const struct bpf_prog_def* def) {
+                    return !strcmp(def->name(), requirement.name);
+                });
+        if (found == selected.end()) {
+            ALOGE("Required program %s is absent from %s", requirement.name, path);
+            return false;
+        }
+        const auto& def = **found;
+        if (def.type != requirement.type || def.attach_type != requirement.attach_type) {
+            ALOGE("Incorrect type or attachment for required program %s", requirement.name);
+            return false;
+        }
+        if (requirement.backport_variant &&
+            (def.min_kver != ((4U << 24) | (14U << 16)) ||
+             def.max_kver != ((4U << 24) | (19U << 16)) ||
+             def.min_api_level_full != 3700 || def.max_api_level_full != 3702)) {
+            ALOGE("Legacy or incorrectly bounded variant for required program %s",
+                  requirement.name);
+            return false;
+        }
+    }
+
+    // Metadata is a requirement, not proof of capability. Actual verification,
+    // map creation, program loading, pinning and validation must still succeed.
+    return loadObject(path, useLibbpf);
+}
+
 static bool loadAllObjects() {
+    if (requiresAndroid17BackportContract()) {
+        static constexpr RequiredBackportProgram offloadPrograms[] = {
+            {"schedcls_tether_downstream6_ether", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_upstream6_ether", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_downstream6_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_upstream6_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_downstream4_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_upstream4_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_downstream4_ether", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_tether_upstream4_ether", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+        };
+        static constexpr RequiredBackportProgram clatPrograms[] = {
+            {"schedcls_ingress6_clat_ether", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, false},
+            {"schedcls_ingress6_clat_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, false},
+            {"schedcls_egress4_clat_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, false},
+        };
+        static constexpr RequiredBackportProgram dscpPrograms[] = {
+            {"schedcls_set_dscp_ether", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+        };
+        // INET_INGRESS is the existing zero/default metadata attachment for
+        // schedcls, schedact, skfilter and the legacy-spelled cgroupsock type.
+        static constexpr RequiredBackportProgram netdPrograms[] = {
+            {"sockops_accecn_option", BPF_PROG_TYPE_SOCK_OPS, BPF_CGROUP_SOCK_OPS, true},
+            {"schedcls_egress_accecn_eth", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"schedcls_egress_accecn_rawip", BPF_PROG_TYPE_SCHED_CLS, BPF_CGROUP_INET_INGRESS, true},
+            {"ingress_stats", BPF_PROG_TYPE_CGROUP_SKB, BPF_CGROUP_INET_INGRESS, true},
+            {"egress_stats", BPF_PROG_TYPE_CGROUP_SKB, BPF_CGROUP_INET_EGRESS, true},
+            {"skfilter_egress_xtbpf", BPF_PROG_TYPE_SOCKET_FILTER, BPF_CGROUP_INET_INGRESS, false},
+            {"skfilter_ingress_xtbpf", BPF_PROG_TYPE_SOCKET_FILTER, BPF_CGROUP_INET_INGRESS, false},
+            {"schedact_ingress_account", BPF_PROG_TYPE_SCHED_ACT, BPF_CGROUP_INET_INGRESS, false},
+            {"skfilter_allowlist_xtbpf", BPF_PROG_TYPE_SOCKET_FILTER, BPF_CGROUP_INET_INGRESS, false},
+            {"skfilter_denylist_xtbpf", BPF_PROG_TYPE_SOCKET_FILTER, BPF_CGROUP_INET_INGRESS, false},
+            {"cgroupsock_inet_create", BPF_PROG_TYPE_CGROUP_SOCK, BPF_CGROUP_INET_INGRESS, true},
+            {"cgroupsockrelease_inet_release", BPF_PROG_TYPE_CGROUP_SOCK, BPF_CGROUP_INET_SOCK_RELEASE, true},
+            {"connect4_inet4_connect", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_CONNECT, true},
+            {"connect6_inet6_connect", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET6_CONNECT, true},
+            {"recvmsg4_udp4_recvmsg", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP4_RECVMSG, true},
+            {"recvmsg6_udp6_recvmsg", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP6_RECVMSG, true},
+            {"sendmsg4_udp4_sendmsg", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP4_SENDMSG, true},
+            {"sendmsg6_udp6_sendmsg", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_UDP6_SENDMSG, true},
+            {"bind4_inet4_bind", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_BIND, true},
+            {"bind6_inet6_bind", BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET6_BIND, true},
+            {"getsockopt_prog", BPF_PROG_TYPE_CGROUP_SOCKOPT, BPF_CGROUP_GETSOCKOPT, true},
+            {"setsockopt_prog", BPF_PROG_TYPE_CGROUP_SOCKOPT, BPF_CGROUP_SETSOCKOPT, true},
+        };
+        return loadBackportObject(BPFROOT "offload.o", false, offloadPrograms) &&
+               loadBackportObject(BPFROOT "test.o", true, {}) &&
+               loadBackportObject(BPFROOT "clatd.o", true, clatPrograms) &&
+               loadBackportObject(BPFROOT "dscpPolicy.o", true, dscpPrograms) &&
+               loadBackportObject(BPFROOT "netd.o", true, netdPrograms);
+    }
+
     // Enable on kernels that have the BPF CFI backports, see: b/488034908
     // b/494690861: funcs may trigger Real-time Kernel Protection (RKP)
     bool funcs = isAtLeast26Q2 && isAtLeastKernelVersion(6, 6, 118);
@@ -1559,23 +1758,39 @@ static int doLoad(char** argv, char * const envp[]) {
         return 4;
     }
 
+    // Explicit downstream policy deviation, not an upstream compatibility claim.
+    // Only native 64-bit API [3700,3702), kernel [4.14,4.19) uses this contract.
+    // loadAllObjects requires the complete mandatory manifest and actual loads;
+    // BpfHandler separately requires attachments, queries and syscall behavior.
+    const bool backportContract = requiresAndroid17BackportContract();
+    if (backportContract) {
+        // Keep the existing empty-program/map startup checks mandatory.
+        if (!runningAsRoot) {
+            ALOGE("Downstream Android 17 backport contract requires the root loader.");
+            return 5;
+        }
+        ALOGW("DOWNSTREAM POLICY DEVIATION: api=%d kver=0x%x; upstream V/25Q2/25Q4 "
+              "minimums 4.19/5.4/5.10 are excepted; full BPF contract remains required.",
+              api_level_full, kernelVer);
+    }
+
     // V bumps the kernel requirement up to 4.19
     // see also: //system/netd/tests/kernel_test.cpp TestKernel419
-    if (isAtLeastV && !isAtLeastKernelVersion(4, 19)) {
+    if (isAtLeastV && !isAtLeastKernelVersion(4, 19) && !backportContract) {
         ALOGE("Android V requires kernel 4.19.");
         return 5;
     }
 
     // 25Q2 bumps the kernel requirement up to 5.4
     // see also: //system/netd/tests/kernel_test.cpp TestKernel54
-    if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4)) {
+    if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4) && !backportContract) {
         ALOGE("Android 25Q2 requires kernel 5.4.");
         return 6;
     }
 
     // 25Q4 bumps the kernel requirement up to 5.10
     // see also: //system/netd/tests/kernel_test.cpp TestKernel510
-    if (isAtLeast25Q4 && !isAtLeastKernelVersion(5, 10)) {
+    if (isAtLeast25Q4 && !isAtLeastKernelVersion(5, 10) && !backportContract) {
         ALOGE("Android 25Q4 requires kernel 5.10.");
         return 7;
     }

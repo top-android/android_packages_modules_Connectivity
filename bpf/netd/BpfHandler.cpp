@@ -49,6 +49,7 @@ using bpf::isKernel64Bit;
 using bpf::isUser;
 using bpf::isUserspace64bit;
 using bpf::queryProgram;
+using bpf::requiresAndroid17BackportContract;
 using bpf::retrieveProgram;
 
 constexpr int PER_UID_STATS_ENTRIES_LIMIT = 500;
@@ -88,8 +89,8 @@ static void getsockoptTest() {
     // getsockopt bpf hook is not called if the device is running in compat mode.
     if (isKernel64Bit() != isUserspace64bit() && !isAtLeastKernelVersion(6, 13)) return;
 
-    // SO_ANDROID_DROP_REASON option is only supported on 5.10+.
-    if (!isAtLeastKernelVersion(5, 10)) return;
+    // The downstream contract also requires the backported drop-reason hook.
+    if (!isAtLeastKernelVersion(5, 10) && !requiresAndroid17BackportContract()) return;
 
     base::unique_fd sock(socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC, 0));
     if (!sock.ok()) abort();
@@ -102,7 +103,8 @@ static void getsockoptTest() {
     // This option expects an 8 byte buffer. Passing a smaller buffer (7 bytes)
     // should trigger a size check failure in the eBPF program (netd.c).
     len = sizeof(reason) - 1;
-    int expected = isAtLeastKernelVersion(6, 1) ? EINVAL : EPERM;
+    int expected = (isAtLeastKernelVersion(6, 1) || requiresAndroid17BackportContract())
+            ? EINVAL : EPERM;
     errno = 0;
     if (getsockopt(sock, SOL_SOCKET, SO_ANDROID_DROP_REASON, &reason, &len) == 0) abort();
     if (errno != expected) abort();
@@ -129,13 +131,24 @@ static Result<void> initPrograms(const char* cg2_path) {
         return Error() << "U+ platform with cg2_path != /sys/fs/cgroup is unsupported";
     }
 
+    // Match the loader's explicit downstream policy deviation. This predicate
+    // selects requirements; it does not prove kernel capabilities or upstream
+    // compatibility. All required retrievals, attachments, queries and the
+    // drop-reason syscall checks below must succeed on this path.
+    const bool backportContract = requiresAndroid17BackportContract();
+    if (backportContract) {
+        ALOGW("DOWNSTREAM POLICY DEVIATION: native 64-bit API [3700,3702), "
+              "kernel [4.14,4.19); V/25Q2 minimums 4.19/5.4 are excepted; "
+              "mandatory BPF attachment and functional checks remain enabled.");
+    }
+
     // V bumps the kernel requirement up to 4.19
-    if (isAtLeastV && !isAtLeastKernelVersion(4, 19)) {
+    if (isAtLeastV && !isAtLeastKernelVersion(4, 19) && !backportContract) {
         return Error() << "V+ platform with kernel version < 4.19.0 is unsupported";
     }
 
     // 25Q2 bumps the kernel requirement up to 5.4
-    if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4)) {
+    if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4) && !backportContract) {
         return Error() << "25Q2+ platform with kernel version < 5.4.0 is unsupported";
     }
 
@@ -239,6 +252,52 @@ static Result<void> initPrograms(const char* cg2_path) {
         if (isAtLeastKernelVersion(6, 1) && !isAtLeastKernelVersion(6, 18)) {
             if (queryProgram(cg_fd, BPF_CGROUP_SOCK_OPS) <= 0) abort();
         }
+    }
+
+    // The downstream backport contract requires these same attachments on a
+    // truthful 4.14 kernel. Any retrieval, attachment or query failure is fatal.
+    if (requiresAndroid17BackportContract()) {
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_INET_RELEASE_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET_SOCK_RELEASE));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT4_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET4_CONNECT));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_CONNECT6_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET6_CONNECT));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_RECVMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP4_RECVMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_RECVMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP6_RECVMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP4_SENDMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP4_SENDMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_UDP6_SENDMSG_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_UDP6_SENDMSG));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_GETSOCKOPT_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_GETSOCKOPT));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_SETSOCKOPT_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_SETSOCKOPT));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(L4S_OPTIONS_SOCKOPS_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_SOCK_OPS));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_BIND4_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET4_BIND));
+        RETURN_IF_NOT_OK(attachProgramToCgroup(CGROUP_BIND6_PROG_PATH,
+                                    cg_fd, BPF_CGROUP_INET6_BIND));
+        getsockoptTest();
+
+        if (queryProgram(cg_fd, BPF_CGROUP_INET_EGRESS) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET_INGRESS) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET_SOCK_CREATE) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET_SOCK_RELEASE) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET4_CONNECT) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET6_CONNECT) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_UDP4_RECVMSG) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_UDP6_RECVMSG) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_UDP4_SENDMSG) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_UDP6_SENDMSG) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_GETSOCKOPT) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_SETSOCKOPT) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_SOCK_OPS) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET4_BIND) <= 0) abort();
+        if (queryProgram(cg_fd, BPF_CGROUP_INET6_BIND) <= 0) abort();
     }
 
     return {};

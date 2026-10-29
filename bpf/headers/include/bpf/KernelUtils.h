@@ -87,7 +87,7 @@ static constexpr unsigned minSupportedKernelVer =
 
 static inline bool isAtLeastKernelVersion(unsigned major, unsigned minor, unsigned sub = 0) {
     unsigned k = KVER(major, minor, sub);
-    if (k <= minSupportedKernelVer) return true;
+    // The platform minimum does not establish the running kernel's version.
     return kernelVer >= k;
 }
 

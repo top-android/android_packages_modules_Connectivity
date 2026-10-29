@@ -170,8 +170,7 @@ procedure void update_accecn_counter(struct __sk_buff* skb) {
     }
 }
 
-DEFINE_BPF_PROG_KVER_RANGE(sockops, accecn_option, AID_SYSTEM, 6_1, 6_18)
-(struct bpf_sock_ops *skops) {
+function int do_sockops_accecn(struct bpf_sock_ops *skops) {
     if (!is_l4s_enabled()) return 1;
     struct bpf_sock *sk = skops->sk;
     if (!sk) return 1;
@@ -211,6 +210,19 @@ DEFINE_BPF_PROG_KVER_RANGE(sockops, accecn_option, AID_SYSTEM, 6_1, 6_18)
         }
     }
     return 1;
+}
+
+DEFINE_BPF_PROG_KVER_RANGE(sockops, accecn_option, AID_SYSTEM, 6_1, 6_18)
+(struct bpf_sock_ops *skops) {
+    return do_sockops_accecn(skops);
+}
+
+// Mandatory downstream backport contract, with unchanged ownership and pin paths.
+DEFINE_BPF_PROG_EXT(sockops, accecn_option, AID_ROOT, AID_SYSTEM,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct bpf_sock_ops *skops) {
+    return do_sockops_accecn(skops);
 }
 
 function void do_egress_accecn(struct __sk_buff* skb, const struct rawip_bool rawip) {
@@ -291,6 +303,22 @@ DEFINE_BPF_PROG_KVER_RANGE(schedcls, egress_accecn_eth, AID_SYSTEM, 6_1, 6_18)
 }
 
 DEFINE_BPF_PROG_KVER_RANGE(schedcls, egress_accecn_rawip, AID_SYSTEM, 6_1, 6_18)
+(struct __sk_buff* skb) {
+    do_egress_accecn(skb, RAWIP);
+    return TC_ACT_PIPE;
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, egress_accecn_eth, AID_ROOT, AID_SYSTEM,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
+(struct __sk_buff* skb) {
+    do_egress_accecn(skb, ETHER);
+    return TC_ACT_PIPE;
+}
+
+DEFINE_BPF_PROG_EXT(schedcls, egress_accecn_rawip, AID_ROOT, AID_SYSTEM,
+                    4_14, 4_19, 26Q2, 26Q3, MANDATORY,
+                    DEFAULT_BPF_MAP_SELINUX_CONTEXT, DEFAULT_BPF_PIN_SUBDIR)
 (struct __sk_buff* skb) {
     do_egress_accecn(skb, RAWIP);
     return TC_ACT_PIPE;

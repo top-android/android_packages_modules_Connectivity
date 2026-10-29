@@ -983,6 +983,13 @@ DEFINE_NETD_BPF_PROG_RANGES(ingress, stats, 6_1, 6_18, 26Q2, MAXAPI)
     return bpf_traffic_account(skb, INGRESS, KVER_6_1, API(26Q2));
 }
 
+// Downstream backport contract: retain full accounting, firewall and AccECN behavior.
+DEFINE_NETD_BPF_PROG_RANGES(ingress, stats, 4_14, 4_19, 26Q2, 26Q3)
+(struct __sk_buff* skb) {
+    update_accecn_counter(skb);
+    return bpf_traffic_account(skb, INGRESS, KVER_6_1, API(26Q2));
+}
+
 // Android 26Q2+ 5.10/5.15 (full featured)
 DEFINE_NETD_BPF_PROG_RANGES(ingress, stats, 5_10, 6_1, 26Q2, MAXAPI)
 (struct __sk_buff* skb) {
@@ -1035,6 +1042,12 @@ DEFINE_NETD_BPF_PROG_RANGES(ingress, stats, 4_9, 4_19, T, V)
 
 // Android 26Q2+ 6.1+ (full featured)
 DEFINE_NETD_BPF_PROG_RANGES(egress, stats, 6_1, INF, 26Q2, MAXAPI)
+(struct __sk_buff* skb) {
+    return bpf_traffic_account(skb, EGRESS, KVER_6_1, API(26Q2));
+}
+
+// Paired with the downstream ingress accounting contract.
+DEFINE_NETD_BPF_PROG_RANGES(egress, stats, 4_14, 4_19, 26Q2, 26Q3)
 (struct __sk_buff* skb) {
     return bpf_traffic_account(skb, EGRESS, KVER_6_1, API(26Q2));
 }
@@ -1208,9 +1221,34 @@ DEFINE_NETD_T_BPF_PROG_KVER(cgroupsock, inet_create, 5_10)
     return inet_socket_create(sk, KVER_5_10);
 }
 
-DEFINE_NETD_T_BPF_PROG_KVER_RANGE(cgroupsock, inet_create, 4_14, 5_10)
+// Preserve legacy creation behavior outside the downstream backport range.
+DEFINE_NETD_BPF_PROG_RANGES(cgroupsock, inet_create, 4_14, 5_10, T, 26Q2)
 (struct bpf_sock* sk) {
     return inet_socket_create(sk, KVER_4_14);
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(cgroupsock, inet_create, 4_19, 5_10, 26Q2, MAXAPI)
+(struct bpf_sock* sk) {
+    return inet_socket_create(sk, KVER_4_14);
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(cgroupsock, inet_create, 4_14, 4_19, 26Q3, MAXAPI)
+(struct bpf_sock* sk) {
+    return inet_socket_create(sk, KVER_4_14);
+}
+
+// Require socket storage initialization and cookie cleanup as a paired lifecycle.
+DEFINE_NETD_BPF_PROG_RANGES(cgroupsock, inet_create, 4_14, 4_19, 26Q2, 26Q3)
+(struct bpf_sock* sk) {
+    return inet_socket_create(sk, KVER_5_10);
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(cgroupsockrelease, inet_release, 4_14, 4_19, 26Q2, 26Q3)
+(struct bpf_sock* sk) {
+    uint64_t cookie = bpf_get_sk_cookie(sk);
+    if (cookie) bpf_cookie_tag_map_delete_elem(&cookie);
+
+    return 1;
 }
 
 DEFINE_NETD_T_BPF_PROG_KVER(cgroupsockrelease, inet_release, 5_10)
@@ -1344,6 +1382,18 @@ DEFINE_NETD_T_BPF_PROG_KVER_RANGE(bind6, inet6_bind, 4_19, 5_15)
     return inet_bind(ctx, KVER_4_19);
 }
 
+// The downstream Android 17.0 contract requires the backported bind-result
+// flag semantics. Reuse the existing permission and blocked-port checks.
+DEFINE_NETD_BPF_PROG_RANGES(bind4, inet4_bind, 4_14, 4_19, 26Q2, 26Q3)
+(struct bpf_sock_addr *ctx) {
+    return inet_bind(ctx, KVER_5_15);
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(bind6, inet6_bind, 4_14, 4_19, 26Q2, 26Q3)
+(struct bpf_sock_addr *ctx) {
+    return inet_bind(ctx, KVER_5_15);
+}
+
 // --- CONNECT CGROUP HOOKS ---
 
 DEFINE_NETD_BPF_PROG_RANGES(connect4, inet4_connect, 4_19, INF, V, MAXAPI)
@@ -1376,6 +1426,38 @@ DEFINE_NETD_BPF_PROG_RANGES(sendmsg4, udp4_sendmsg, 4_19, INF, V, MAXAPI)
 }
 
 DEFINE_NETD_BPF_PROG_RANGES(sendmsg6, udp6_sendmsg, 4_19, INF, V, MAXAPI)
+(__unused struct bpf_sock_addr *ctx) {
+    return BPF_ALLOW;
+}
+
+// Preserve the existing upstream address-hook bodies for the downstream contract.
+// Each declared attachment remains mandatory; unsupported hooks must fail loading.
+DEFINE_NETD_BPF_PROG_RANGES(connect4, inet4_connect, 4_14, 4_19, 26Q2, 26Q3)
+(__unused struct bpf_sock_addr *ctx) {
+    return BPF_ALLOW;
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(connect6, inet6_connect, 4_14, 4_19, 26Q2, 26Q3)
+(__unused struct bpf_sock_addr *ctx) {
+    return BPF_ALLOW;
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(recvmsg4, udp4_recvmsg, 4_14, 4_19, 26Q2, 26Q3)
+(__unused struct bpf_sock_addr *ctx) {
+    return BPF_ALLOW;
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(recvmsg6, udp6_recvmsg, 4_14, 4_19, 26Q2, 26Q3)
+(__unused struct bpf_sock_addr *ctx) {
+    return BPF_ALLOW;
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(sendmsg4, udp4_sendmsg, 4_14, 4_19, 26Q2, 26Q3)
+(__unused struct bpf_sock_addr *ctx) {
+    return BPF_ALLOW;
+}
+
+DEFINE_NETD_BPF_PROG_RANGES(sendmsg6, udp6_sendmsg, 4_14, 4_19, 26Q2, 26Q3)
 (__unused struct bpf_sock_addr *ctx) {
     return BPF_ALLOW;
 }
@@ -1439,6 +1521,15 @@ DEFINE_NETD_BPF_PROG_RANGES(getsockopt, prog, 6_1, 6_18, 26Q2, MAXAPI)
     return inet_getsockopt(ctx, KVER_6_1, API(26Q2));
 }
 
+// Downstream Android 17.0 contract for kernels carrying the complete backports.
+// Require the existing retval helpers, socket storage and L4S permission checks.
+// Mandatory program loading must fail if the kernel lacks this support.
+// Explicit minimum-kernel policy remains enforced separately by userspace.
+DEFINE_NETD_BPF_PROG_RANGES(getsockopt, prog, 4_14, 4_19, 26Q2, 26Q3)
+(struct bpf_sockopt *ctx) {
+    return inet_getsockopt(ctx, KVER_6_1, API(26Q2));
+}
+
 DEFINE_NETD_BPF_PROG_RANGES(getsockopt, prog, 6_1, 6_18, V, 26Q2)
 (struct bpf_sockopt *ctx) {
     return inet_getsockopt(ctx, KVER_6_1, API(V));
@@ -1493,6 +1584,12 @@ DEFINE_NETD_BPF_PROG_RANGES(setsockopt, prog, 6_18, INF, V, MAXAPI)
 }
 
 DEFINE_NETD_BPF_PROG_RANGES(setsockopt, prog, 6_1, 6_18, 26Q2, MAXAPI)
+(struct bpf_sockopt *ctx) {
+    return inet_setsockopt(ctx, KVER_6_1, API(26Q2));
+}
+
+// Paired with the required getsockopt backport variant above.
+DEFINE_NETD_BPF_PROG_RANGES(setsockopt, prog, 4_14, 4_19, 26Q2, 26Q3)
 (struct bpf_sockopt *ctx) {
     return inet_setsockopt(ctx, KVER_6_1, API(26Q2));
 }
