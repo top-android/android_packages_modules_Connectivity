@@ -53,8 +53,19 @@ bpf::RingbufEventPoller<LoopbackAccessEvent> *
 LoopbackEventHandler::GetPoller() {
     static bpf::RingbufEventPoller<LoopbackAccessEvent> *const sPoller =
         []() -> bpf::RingbufEventPoller<LoopbackAccessEvent> * {
-        auto rb = std::make_unique<BpfRingbuf<LoopbackAccessEvent>>(
+        // [cannon][A17·4.14] BPF ringbuf 是 5.8 才进主线的，4.14 上
+        // /sys/fs/bpf/netd_shared/map_netd_loopback_access_ringbuf 不存在。
+        // 上游 BpfRingbuf 的构造函数在 Init() 失败时 abort()，会把 system_server
+        // 打成崩溃循环。这里改用 Create()，失败就降级为不统计 loopback 使用情况。
+        auto rb = BpfRingbuf<LoopbackAccessEvent>::Create(
             LOOPBACK_ACCESS_RINGBUF_NETD_PATH);
+        if (!rb.ok()) {
+            ALOGW("[cannon] %s unavailable (kernel 4.14, no BPF ringbuf), degrade: "
+                  "loopback usage reporting disabled: %s",
+                  LOOPBACK_ACCESS_RINGBUF_NETD_PATH,
+                  rb.error().message().c_str());
+            return nullptr;
+        }
 
         auto callback = [](const std::vector<LoopbackAccessEvent> &events) {
             for (const LoopbackAccessEvent &event : events) {
@@ -66,7 +77,7 @@ LoopbackEventHandler::GetPoller() {
         };
 
         auto result = RingbufEventPoller<LoopbackAccessEvent>::Create(
-            std::move(callback), std::move(rb));
+            std::move(callback), std::move(rb.value()));
 
         if (!result.ok()) {
             ALOGE("Failed to create RingbufEventPoller: %s",

@@ -132,7 +132,13 @@ static void verifyClatPerms() {
 
 #undef V2
 
-    if (fatal) abort();
+    if (fatal) {
+        // [cannon][A17·4.14] 4.14.336 无 A17 BPF backport，bpfloader 加载不到
+        // net_shared 下的 clatd prog/map，校验必失败。老 vendor 上新 Android
+        // 不该因此 abort 打死 system_server（JNI_OnLoad 连锁 → 开机重启）。
+        ALOGE("cannon: ClatCoordinator perm/BPF verify failed (kernel 4.14, "
+              "BPF not loaded) - degrade, no abort");
+    }
 }
 
 #undef V

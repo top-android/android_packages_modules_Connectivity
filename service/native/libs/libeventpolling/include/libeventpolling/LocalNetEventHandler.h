@@ -35,8 +35,12 @@ class LocalNetEventHandler {
 
     // Returns a duplicate of the ring buffer file descriptor. This is needed so
     // we can pass the file descriptor via jni for use in polling in java.
+    // [cannon][A17·4.14] 内核没有 BPF ringbuf 时返回无效 fd，调用方（JNI / Java）
+    // 必须容忍这种情况。
     static android::base::unique_fd GetNewRingbufFd() {
-        return GetRingbuf()->GetDuplicateFd();
+        LocalNetEventRingbuf *ringbuf = GetRingbuf();
+        if (ringbuf == nullptr) return {};
+        return ringbuf->GetDuplicateFd();
     }
 
     // Consumes all available events in the ring buffer. Returns a list of

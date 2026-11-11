@@ -66,5 +66,5 @@ service bpfloader /apex/com.android.tethering/bin/netbpfload
     #    'cannot prove return value is 0 or 1' or 'unsupported / unknown operation / helper',
     #    'invalid bpf_context access', etc.
     #
-    reboot_on_failure reboot,bpfloader-failed
+    # reboot_on_failure reboot,bpfloader-failed  # cannon: 4.14 内核降级期临时去掉，先拿日志
     override

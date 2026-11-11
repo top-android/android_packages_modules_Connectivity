@@ -46,9 +46,11 @@ on load-bpf-programs
     # result in 'bpf.progs_loaded' property being set to '1'.
     exec_start bpfloader
 
-    # Wait for bpf programs to be loaded before proceeding.
-    # (this will hang if bpfloader fails)
-    wait_for_prop bpf.progs_loaded 1
+    # [cannon][A17·4.14] 4.14.336 缺 BPF ringbuf/BTF 等能力，loader 必然失败，
+    # 原来的 wait_for_prop 会把 init 动作队列永久挂住（adbd 都起不来）。
+    # 调试期先直接置位，让 init 继续走，从而能 adb 进去抓 NetBpfLoad 的真实报错。
+    # wait_for_prop bpf.progs_loaded 1
+    setprop bpf.progs_loaded 1
 
     # Restore kallsyms protection after bpf programs have been loaded.
     # This has to happen after bpfloader has already terminated.

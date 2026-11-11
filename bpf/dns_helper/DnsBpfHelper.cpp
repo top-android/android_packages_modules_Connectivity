@@ -18,6 +18,8 @@
 
 #include "DnsBpfHelper.h"
 
+#include <unistd.h>
+
 #include <android-base/logging.h>
 #include <android-base/properties.h>
 #include <android-modules-utils/sdk_level.h>
@@ -69,6 +71,20 @@ base::Result<void> DnsBpfHelper::init() {
       waitForNetProgsLoaded();
       LOG(INFO) << "Networking BPF programs are loaded";
     }
+    return {};
+  }
+
+  // [cannon][A17·4.14] 4.14 内核上 bpfloader 没法把 netd_shared 的 BPF map pin 出来，
+  // /sys/fs/bpf/netd_shared/ 下这几个 map 文件根本不存在。上游这里返回 ENOENT，
+  // 而调用方 DnsProxyListener 的构造函数是 `if (ADnsHelper_init()) abort();`
+  // → netd 直接 SIGABRT，netd.rc 的 `onrestart restart zygote` 又把 zygote
+  // 拖进重启循环，开机就永远停在开机动画（logcat: DnsBpfHelper: L75 init:
+  // No such file or directory → Fatal signal 6 in tid (netd)）。
+  // 4.14 上降级：没有 map 就没有「按 uid 限流 DNS」，解析本身不受影响。
+  if (access(CONFIGURATION_MAP_PATH, F_OK) != 0) {
+    LOG(WARNING) << "[cannon] " << CONFIGURATION_MAP_PATH
+                 << " missing (kernel 4.14, netd BPF maps not pinned), degrade: "
+                    "DNS uid networking blocking disabled";
     return {};
   }
 
