@@ -32,7 +32,12 @@ int libnetd_updatable_init(const char* cg2_path) {
     android::base::Result<void> ret = sBpfHandler.init(cg2_path);
     if (!ret.ok()) {
         LOG(ERROR) << __func__ << ": Failed: " << ret.error().message();
-        abort();
+        // [cannon][A17·4.14] 本机 4.14.336 没有 A17 需要的 BPF backport，
+        // BPF 初始化必失败。不 abort，让 netd 跳过 BPF 继续服务：
+        // BpfHandler::tagSocket 会因 mCookieTagMap 无效而安全返回 -EPERM。
+        // 否则 netd 崩溃循环 → system_server 卡死 → 永远开不了机。
+        LOG(WARNING) << "[cannon] BPF init failed on 4.14 (degrade, netd continues without BPF)";
+        return 0;
     }
     return 0;
 }

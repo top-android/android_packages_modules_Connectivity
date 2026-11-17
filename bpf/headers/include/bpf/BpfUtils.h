@@ -156,15 +156,12 @@ const bool isAtLeast25Q2 = (api_level_full >= 3600);  // 36.0
 const bool isAtLeast25Q4 = (api_level_full >= 3610);  // 36.1
 const bool isAtLeast26Q2 = (api_level_full >= 3700);  // 37.0
 
-// Downstream Android 17.0 requirements for the backported 64-bit 4.14 kernel.
-// This is not a capability probe or an upstream compatibility claim. All maps,
-// programs, attachments and functional checks remain mandatory. Callers must
-// handle minimum-version policy exceptions explicitly; version queries remain
-// truthful and unchanged.
+// [cannon][A17·4.14] 本机内核 4.14.336 没有 backport CGROUP_SOCK_ADDR /
+// CGROUP_SOCKOPT / INET_SOCK_RELEASE 等能力（bpf_prog_load 直接 -EINVAL），
+// 满足不了"完整 backport 契约"。恒为 false，让 loader / BpfHandler 回到
+// 上游 4.14 路径，再由各自的版本闸门降级处理（不 backport，走闸门降级）。
 static inline bool requiresAndroid17BackportContract() {
-    return isKernel64Bit() && isUserspace64bit() &&
-           api_level_full >= 3700 && api_level_full < 3702 &&
-           isAtLeastKernelVersion(4, 14) && !isAtLeastKernelVersion(4, 19);
+    return false;
 }
 const bool isAtLeast26Q3 = (api_level_full >= 3702);  // 37.0+
 const bool isAtLeast26Q4 = (api_level_full >= 3710);  // 37.1

@@ -143,13 +143,15 @@ static Result<void> initPrograms(const char* cg2_path) {
     }
 
     // V bumps the kernel requirement up to 4.19
+    // [cannon][A17·4.14] 闸门降级：不返回错误，继续往下（后续 checkProgramAccessible
+    // 失败时由 NetdUpdatable 侧降级兜底，不让 netd abort）
     if (isAtLeastV && !isAtLeastKernelVersion(4, 19) && !backportContract) {
-        return Error() << "V+ platform with kernel version < 4.19.0 is unsupported";
+        ALOGW("V+ platform with kernel version < 4.19.0 (cannon 4.14: degrade, continue)");
     }
 
     // 25Q2 bumps the kernel requirement up to 5.4
     if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4) && !backportContract) {
-        return Error() << "25Q2+ platform with kernel version < 5.4.0 is unsupported";
+        ALOGW("25Q2+ platform with kernel version < 5.4.0 (cannon 4.14: degrade, continue)");
     }
 
     unique_fd cg_fd(open(cg2_path, O_DIRECTORY | O_RDONLY | O_CLOEXEC));

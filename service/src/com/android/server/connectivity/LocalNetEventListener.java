@@ -98,6 +98,15 @@ public class LocalNetEventListener {
         if (mStarted) {
             return;
         }
+        // [cannon][A17·4.14] 4.14 内核没有 BPF ringbuf，native 层降级返回 null。
+        // 直接注册 null fd 会在 MessageQueue.addOnFileDescriptorEventListener 里 NPE，
+        // 把 system_server 打崩。
+        if (mRingbufFd == null) {
+            Log.w(TAG, "[cannon] local net access ringbuf unavailable (kernel 4.14), "
+                    + "skip event listener");
+            mStarted = true;
+            return;
+        }
         if (mMetricsEnabled || mNoteOpsEnabled) {
             mLooper.getQueue().addOnFileDescriptorEventListener(mRingbufFd,
                     EVENT_INPUT | EVENT_ERROR, this::consumeEvents);

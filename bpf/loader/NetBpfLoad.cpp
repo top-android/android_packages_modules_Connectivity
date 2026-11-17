@@ -160,7 +160,11 @@ class ElfObject {
             return self_st.st_dev;
         }();
 
-        if (st.st_dev != self_dev) {
+        // [cannon][A17·4.14] 调试逃生口：允许从 /data/local/tmp 手动跑 loader 验证补丁
+        // （/proc/self/exe 与 .o 不在同一挂载设备时原本直接 abort）。init 启动的服务没有
+        // 这个环境变量，正常启动路径行为不变。
+        static const bool allowExternal = getenv("CANNON_BPF_ALLOW_EXTERNAL") != nullptr;
+        if (!allowExternal && st.st_dev != self_dev) {
             ALOGE("file %s is on device %llu, while we are on device %llu",
                   path, (unsigned long long)st.st_dev, (unsigned long long)self_dev);
             abort();
@@ -385,6 +389,12 @@ int readCodeSections(const ElfObject& elfObj, vector<codeSection>& cs) {
 
 static unsigned int sanitizeMapFlags(unsigned int map_flags) {
     if (!isAtLeastKernelVersion(5, 10)) map_flags &= ~BPF_F_MMAPABLE;
+    // [cannon][A17·4.14] BPF_F_RDONLY_PROG/WRONLY_PROG 是 4.15 才有的 flag，
+    // 4.14.336 内核创建 map 时会静默丢弃；期望值也一并剥掉，否则
+    // mapMatchesExpectations 的 flags 比对必然失败（desired 0x80 / found 0）
+    if (!isAtLeastKernelVersion(4, 15)) {
+        map_flags &= ~(BPF_F_RDONLY_PROG | BPF_F_WRONLY_PROG);
+    }
     return map_flags;
 }
 
@@ -411,8 +421,13 @@ static bool mapMatchesExpectations(const unique_fd& fd,
     // DEVMAPs are readonly from the bpf program side's point of view, as such
     // the kernel in kernel/bpf/devmap.c dev_map_init_map() will set the flag
     unsigned int desired_map_flags = sanitizeMapFlags(mapDef.map_flags);
-    if (type == BPF_MAP_TYPE_DEVMAP || type == BPF_MAP_TYPE_DEVMAP_HASH)
-        desired_map_flags |= BPF_F_RDONLY_PROG;
+    // [cannon][A17·4.14] DEVMAP 的 BPF_F_RDONLY_PROG 由内核 dev_map_init_map() 自己置，
+    // 不同 4.14 树行为不一致：4.14.336 不置，4.14.357-openela 置。
+    // 这一位不归用户空间管，比较时两边都忽略，避免 desired 0x80/found 0 或反过来失配。
+    if (type == BPF_MAP_TYPE_DEVMAP || type == BPF_MAP_TYPE_DEVMAP_HASH) {
+        desired_map_flags &= ~BPF_F_RDONLY_PROG;
+        fd_map_flags &= ~BPF_F_RDONLY_PROG;
+    }
 
     // The .h file enforces that this is a power of two, and page size will
     // also always be a power of two, so this logic is actually enough to
@@ -806,7 +821,7 @@ static int probeBtfSupport() {
 }
 
 static int createMaps(const ElfObject& elfObj, const span<const struct bpf_map_def> md,
-                      vector<unique_fd>& mapFds) {
+                      vector<unique_fd>& mapFds, const bool keepGoing = false) {
     int ret = 0;
     span<const char> btfData;
     struct btf *btf = NULL;
@@ -880,14 +895,24 @@ static int createMaps(const ElfObject& elfObj, const span<const struct bpf_map_d
         }
 
         unique_fd fd;
-        int saved_errno;
+        int saved_errno = 0;
 
-        if (access(md[i].pin_location, F_OK) == 0) {
+        // [cannon][A17·4.14] 原版在“复用已 pin 的 map”分支里留有无条件 abort()（上游调试残留）：
+        // 上游每次开机 bpffs 都是空的走不到；但重复运行 loader 或上次运行半途失败已 pin
+        // 部分 map 时会直接 SIGABRT。改成：拿到有效 fd 就复用，拿不到就走正常创建。
+        bool reuse = access(md[i].pin_location, F_OK) == 0;
+        if (reuse) {
             fd.reset(mapRetrieveRO(md[i].pin_location));
             saved_errno = errno;
             ALOGD("bpf_create_map reusing map %s, ret: %d", md[i].name(), fd.get());
-            abort();
-        } else {
+            if (!fd.ok()) {
+                ALOGW("[cannon] reuse map %s failed (errno %d), create instead",
+                      md[i].name(), saved_errno);
+                reuse = false;
+            }
+        }
+
+        if (!reuse) {
             union bpf_attr req = {
               .map_type = type,
               .key_size = md[i].key_size,
@@ -920,15 +945,34 @@ static int createMaps(const ElfObject& elfObj, const span<const struct bpf_map_d
             }
         }
 
-        if (!fd.ok()) return -saved_errno;
+        if (!fd.ok()) {
+            if (!keepGoing) return -saved_errno;
+            ALOGE("[cannon] map %s create failed errno %d - continue", md[i].name(), saved_errno);
+            mapFds.push_back(unique_fd());
+            continue;
+        }
 
         // When reusing a pinned map, we need to check the map type/sizes/etc match, but for
         // safety (since reuse code path is rare) run these checks even if we just created it.
         // We assume failure is due to pinned map mismatch, hence the 'NOT UNIQUE' return code.
-        if (!mapMatchesExpectations(fd, md[i], type)) return -ENOTUNIQ;
+        if (!mapMatchesExpectations(fd, md[i], type)) {
+            if (!keepGoing) return -ENOTUNIQ;
+            ALOGE("[cannon] map %s does not match expectations - continue", md[i].name());
+            mapFds.push_back(unique_fd());
+            continue;
+        }
 
-        ret = pinMap(fd, md[i]);
-        if (ret) return ret;
+        // [cannon][A17·4.14] 复用路径下 map 本来就已经 pin 在 md[i].pin_location，
+        // 再 pin 一次必然 EEXIST(-17) 导致整个 object 加载失败
+        if (!reuse) {
+            ret = pinMap(fd, md[i]);
+            if (ret) {
+                if (!keepGoing) return ret;
+                ALOGE("[cannon] pin map %s failed %d - continue", md[i].name(), ret);
+                mapFds.push_back(unique_fd());
+                continue;
+            }
+        }
 
         mapFds.push_back(std::move(fd));
     }
@@ -1413,6 +1457,44 @@ static bool loadObject(const char* const progPath, const bool useLibbpf = true) 
     return true;
 }
 
+// [cannon][A17·4.14] 4.14 上没有 A17 的 BPF backport，bpf_object__load() 只要有一个
+// 程序过不了 verifier，整个 object 就失败，连它的 map 一个都不会 pin。
+// 而 netd / system_server / ConnectivityService 只依赖这些 map 文件存在：
+//   netd_shared/map_netd_configuration_map  → BpfNetMaps / DnsBpfHelper
+//   netd_shared/map_netd_cookie_tag_map     → NetworkStatsFactory
+// 缺一个就是 system_server FATAL EXCEPTION 无限重启。
+// 所以完整加载失败时，退回只建 map + pin（不加载任何程序），保证文件都在。
+static int pinMapsOnly(const char* const elfPath) {
+    ElfObject elfObj(elfPath);
+    span<const struct bpf_map_def> md;
+    int ret = elfObj.readSectionByName(".android_maps", md);
+    if (ret == -2) return 0;  // no maps
+    if (ret) {
+        ALOGE("[cannon] pinMapsOnly: cannot read .android_maps from %s: %d", elfPath, ret);
+        return ret;
+    }
+    vector<unique_fd> mapFds;
+    ret = createMaps(elfObj, md, mapFds, /*keepGoing=*/true);
+    ALOGW("[cannon] pinMapsOnly(%s): %zu maps processed, ret=%d", elfPath, md.size(), ret);
+    return ret;
+}
+
+static bool loadObjectOrPinMaps(const char* const progPath, const bool useLibbpf = true) {
+    // [cannon][A17·4.14] 4.14 内核满足不了 A17 的 verifier 要求，bpf_object__load() 必然失败。
+    // 每次失败前的逐个程序校验会把同步执行的 init（exec_start bpfloader）阻塞约 20s
+    // （实测 event.load-bpf-programs 10.09s → zygote-start 30.30s）。
+    // netd_shared/* map 是 system_server / NetworkStats 的硬依赖，而 map 创建是毫秒级，
+    // prog 在 4.14 上本来也加载不了，所以直接只建 map + pin，跳过 prog 加载。
+    if (!isAtLeastKernelVersion(4, 19)) {
+        ALOGW("[cannon] kernel < 4.19: maps-only pinning (skip prog load): %s", progPath);
+        return pinMapsOnly(progPath) == 0;
+    }
+    if (loadObject(progPath, useLibbpf)) return true;
+    ALOGW("[cannon] object load failed (%s), falling back to maps-only pinning", progPath);
+    pinMapsOnly(progPath);
+    return false;
+}
+
 #define APEXROOT "/apex/com.android.tethering"
 #define BPFROOT APEXROOT "/etc/bpf/mainline/"
 
@@ -1541,8 +1623,9 @@ static bool loadAllObjects() {
             {"getsockopt_prog", BPF_PROG_TYPE_CGROUP_SOCKOPT, BPF_CGROUP_GETSOCKOPT, true},
             {"setsockopt_prog", BPF_PROG_TYPE_CGROUP_SOCKOPT, BPF_CGROUP_SETSOCKOPT, true},
         };
+        // [cannon][A17·4.14] test.o 依赖 libbpf 复用其它 object 已 pin 的共享 map，
+        // libbpf 不支持跨 object 复用（返回 1）；且它只是自测程序，降级为不加载
         return loadBackportObject(BPFROOT "offload.o", false, offloadPrograms) &&
-               loadBackportObject(BPFROOT "test.o", true, {}) &&
                loadBackportObject(BPFROOT "clatd.o", true, clatPrograms) &&
                loadBackportObject(BPFROOT "dscpPolicy.o", true, dscpPrograms) &&
                loadBackportObject(BPFROOT "netd.o", true, netdPrograms);
@@ -1552,17 +1635,24 @@ static bool loadAllObjects() {
     // b/494690861: funcs may trigger Real-time Kernel Protection (RKP)
     bool funcs = isAtLeast26Q2 && isAtLeastKernelVersion(6, 6, 118);
 
-    if (!loadObject(BPFROOT "offload.o", /*libbpf*/false)) return false;
-    if (!loadObject(BPFROOT "test.o")) return false;
-    if (!loadObject(BPFROOT "clatd.o")) return false;
+    // [cannon][A17·4.14] offload.o 在 4.14 上同样加载不了 prog；走 maps-only 快路径，
+    // 既省掉 verifier 时间，也避免这里的 if 短路让后面的 clatd/dscpPolicy/netd 轮不到。
+    if (!loadObjectOrPinMaps(BPFROOT "offload.o", /*libbpf*/false)) return false;
+    // [cannon][A17·4.14] 同 backport 路径：test.o 跨 object 复用其它 object 已 pin 的
+    // 共享 map，libbpf 不支持（返回 1），在 4.14 上必然失败并拖死整个加载序列，
+    // 后面的 clatd/dscpPolicy/netd 都轮不到。它只是自测程序，跳过。
+    // 另外这里绝不能再用 && 短路：4.14 上 offload.o 几乎必然失败，短路会让
+    // clatd/dscpPolicy/netd 的 map 一个都建不出来。
+    bool ok = true;
+    ok &= loadObjectOrPinMaps(BPFROOT "clatd.o");
     if (funcs) {
-        if (!loadObject(BPFROOT "dscpPolicy@funcs.o")) return false;
-        if (!loadObject(BPFROOT "netd@funcs.o")) return false;
+        ok &= loadObjectOrPinMaps(BPFROOT "dscpPolicy@funcs.o");
+        ok &= loadObjectOrPinMaps(BPFROOT "netd@funcs.o");
     } else {
-        if (!loadObject(BPFROOT "dscpPolicy.o")) return false;
-        if (!loadObject(BPFROOT "netd.o")) return false;
+        ok &= loadObjectOrPinMaps(BPFROOT "dscpPolicy.o");
+        ok &= loadObjectOrPinMaps(BPFROOT "netd.o");
     }
-    return true;
+    return ok;
 }
 
 static bool createDir(const char* const dir) {
@@ -1776,23 +1866,21 @@ static int doLoad(char** argv, char * const envp[]) {
 
     // V bumps the kernel requirement up to 4.19
     // see also: //system/netd/tests/kernel_test.cpp TestKernel419
+    // [cannon][A17·4.14] 闸门降级：本机 4.14.336 不 backport，照常往下走
     if (isAtLeastV && !isAtLeastKernelVersion(4, 19) && !backportContract) {
-        ALOGE("Android V requires kernel 4.19.");
-        return 5;
+        ALOGW("Android V requires kernel 4.19 (cannon 4.14: degrade, continue).");
     }
 
     // 25Q2 bumps the kernel requirement up to 5.4
     // see also: //system/netd/tests/kernel_test.cpp TestKernel54
     if (isAtLeast25Q2 && !isAtLeastKernelVersion(5, 4) && !backportContract) {
-        ALOGE("Android 25Q2 requires kernel 5.4.");
-        return 6;
+        ALOGW("Android 25Q2 requires kernel 5.4 (cannon 4.14: degrade, continue).");
     }
 
     // 25Q4 bumps the kernel requirement up to 5.10
     // see also: //system/netd/tests/kernel_test.cpp TestKernel510
     if (isAtLeast25Q4 && !isAtLeastKernelVersion(5, 10) && !backportContract) {
-        ALOGE("Android 25Q4 requires kernel 5.10.");
-        return 7;
+        ALOGW("Android 25Q4 requires kernel 5.10 (cannon 4.14: degrade, continue).");
     }
 
     // 26Q4 bumps the kernel requirement up to 5.15
@@ -1999,14 +2087,15 @@ static int doLoad(char** argv, char * const envp[]) {
         errno = 0;
         uint32_t progId = bpfGetNextProgId(0);  // expect 0 with errno == ENOENT
         if (progId || errno != ENOENT) {
-            ALOGE("bpfGetNextProgId(zero) returned %u (errno %d)", progId, errno);
-            return 32;
+            // [cannon][A17·4.14] MTK 内核启动早期已有 BPF prog（bpf_mt_init 等 initcall），
+            // 不再视为“非首次加载”错误，降级继续
+            ALOGW("[cannon] bpfGetNextProgId(zero) returned %u (errno %d) - degrade, continue", progId, errno);
         }
         errno = 0;
         uint32_t mapId = bpfGetNextMapId(0);  // expect 0 with errno == ENOENT
         if (mapId || errno != ENOENT) {
-            ALOGE("bpfGetNextMapId(zero) returned %u (errno %d)", mapId, errno);
-            return 33;
+            // [cannon][A17·4.14] 同上：内核已有 map（id=1），降级继续而不是退出
+            ALOGW("[cannon] bpfGetNextMapId(zero) returned %u (errno %d) - degrade, continue", mapId, errno);
         }
     } else if (isAtLeastKernelVersion(4, 14)) {  // implies S through U QPR2
         // bpfGetNext{Prog,Map}Id require 4.14+
@@ -2052,16 +2141,26 @@ static int doLoad(char** argv, char * const envp[]) {
         ALOGE("If this triggers randomly, you might be hitting some memory allocation "
               "problems or startup script race.");
         ALOGE("--- DO NOT EXPECT SYSTEM TO BOOT SUCCESSFULLY ---");
-        sleep(20);
-        return 38;
+        // [cannon][A17·4.14] 降级：4.14 内核缺 backport，netd.o 里
+        // CGROUP_SOCK_ADDR / CGROUP_SOCKOPT / INET_SOCK_RELEASE 程序必然加载失败。
+        // 这里绝不能 return 38 —— 否则永远走不到后面的平台 loader
+        // （/system/bin/bpfloader），/system/etc/bpf/gpuMem.bpf 不会 pin，
+        // system_server 读 gpu_mem_total_map 时 BpfMapRO 直接 abort。
+        // 记录后继续，让平台 loader 照常执行；netd 侧由 BpfHandler 降级兜底。
+        ALOGW("[cannon] loadAllObjects failed on 4.14 (no A17 BPF backport) - degrade, continue");
     }
 
     auto end = steady_clock::now();
     auto timeTaken = duration_cast<milliseconds>(end - start).count();
     ALOGD("Loaded total objects took %lld ms", timeTaken);
     {
+        // [cannon][A17·4.14] 统计 map（map_test_kernel_stats_map）由 test.o 提供，
+        // 而我们的补丁已把 test.o 降级为不加载，所以这里 fd 必然是空的。
+        // 它只是遥测，不该让整个 loader 返回 39 把开机流程判成失败。
         uint32_t key = BPF_KERNEL_STATS_MAP_KEY_TOTAL_OBJS_LOAD_TIME_MS;
-        if (writeToMapEntry(bpfKernelStatsMapFd, &key, &timeTaken, BPF_ANY)) {
+        if (!bpfKernelStatsMapFd.ok()) {
+            ALOGW("[cannon] kernel stats map absent (test.o skipped), skip telemetry");
+        } else if (writeToMapEntry(bpfKernelStatsMapFd, &key, &timeTaken, BPF_ANY)) {
             ALOGE("Failed to write object load time to kernel stats map, err: [%d, %s]",
                   errno, strerror(errno));
             return 39;
@@ -2069,7 +2168,8 @@ static int doLoad(char** argv, char * const envp[]) {
 
         uint32_t value = 123;
         key = BPF_KERNEL_STATS_MAP_KEY_UBSAN_BUG;
-        if (writeToMapEntry(bpfKernelStatsMapFd, &key, &value, BPF_ANY)) {
+        if (bpfKernelStatsMapFd.ok() &&
+            writeToMapEntry(bpfKernelStatsMapFd, &key, &value, BPF_ANY)) {
             ALOGE("Critical kernel bug - failure to write into index 1 of 2 element bpf map array."
                   "[%d, %s]", errno, strerror(errno));
             if (isAtLeastT) return 40;
@@ -2111,6 +2211,10 @@ static int doLoad(char** argv, char * const envp[]) {
 
 int main(int argc, char** argv, char * const envp[]) {
     if (android::bpf::isAtLeastT) {
+        // [cannon][A17·4.14] 必须用 KernelLogger 写 /dev/kmsg。
+        // bpfloader 域在 sepolicy 里只有 kmsg_device 写权限（private/bpfloader.te），
+        // 没有 logd_socket；LogdLogger 的写入被 SELinux 丢弃后会回落到 stderr，
+        // 而 init 服务的 stderr 进 /dev/null —— logcat 里一条 NetBpfLoad 都没有。
         InitLogging(argv, &KernelLogger);
     } else {
         // S lacks the sepolicy to make non-root uid KernelLogger viable
